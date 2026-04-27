@@ -1,0 +1,5 @@
+ALTER TABLE processed_cancellation_notes
+ADD CONSTRAINT uq_processed_cancellation_notes_source_note_id
+UNIQUE (source_note_id);
+
+DROP INDEX IF EXISTS idx_cancellation_source_note_id;

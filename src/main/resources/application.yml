@@ -55,11 +55,24 @@ app:
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
     topics:
-      cancellationnote-processed: cancellationnote.processed
+      cancellation-note-processed: cancellationnote.processed
       dlq: cancellationnote.processing.dlq
       saga-command-cancellation-note: saga.command.cancellation-note
       saga-compensation-cancellation-note: saga.compensation.cancellation-note
       saga-reply-cancellation-note: saga.reply.cancellation-note
+    consumers:
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:100}
+      count: ${KAFKA_CONSUMERS_COUNT:3}
+  camel:
+    retry:
+      max-redeliveries: ${CAMEL_MAX_REDELIVERIES:3}
+      redelivery-delay-ms: ${CAMEL_REDELIVERY_DELAY_MS:1000}
+      backoff-multiplier: ${CAMEL_BACKOFF_MULTIPLIER:2.0}
+      max-redelivery-delay-ms: ${CAMEL_MAX_REDELIVERY_DELAY_MS:10000}
+  outbox:
+    cleanup:
+      retention-days: ${OUTBOX_RETENTION_DAYS:7}
+      cron: "0 0 2 * * *"
 
 eureka:
   client:

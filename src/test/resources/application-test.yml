@@ -6,16 +6,25 @@ spring:
     name: cancellationnote-processing-service
 
   datasource:
-    url: jdbc:h2:mem:testdb
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
     driver-class-name: org.h2.Driver
+    username: sa
+    password:
 
   jpa:
     hibernate:
       ddl-auto: create-drop
-    show-sql: true
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        format_sql: true
+
+  flyway:
+    enabled: false
 
 camel:
-    springboot:
+  springboot:
     name: cancellationnote-processing-camel-test
   dataformat:
     jackson:
@@ -25,13 +34,27 @@ app:
   kafka:
     bootstrap-servers: localhost:9093
     topics:
-      cancellationnote-processed: cancellationnote.processed.test
+      cancellation-note-processed: cancellationnote.processed.test
       dlq: cancellationnote.processing.dlq.test
       saga-command-cancellation-note: saga.command.cancellation-note.test
       saga-compensation-cancellation-note: saga.compensation.cancellation-note.test
       saga-reply-cancellation-note: saga.reply.cancellation-note.test
+    consumers:
+      max-poll-records: 10
+      count: 1
+  camel:
+    retry:
+      max-redeliveries: 1
+      redelivery-delay-ms: 100
+      backoff-multiplier: 1.0
+      max-redelivery-delay-ms: 200
+  outbox:
+    cleanup:
+      retention-days: 7
+      cron: "0 0 2 * * *"
 
 logging:
   level:
-    root: INFO
-    com.wpanther.cancellationnote.processing: DEBUG
+    root: WARN
+    com.wpanther.cancellationnote.processing: INFO
+    org.apache.camel: WARN
