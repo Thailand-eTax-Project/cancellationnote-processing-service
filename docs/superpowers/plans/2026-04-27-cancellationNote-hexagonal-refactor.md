@@ -1756,4 +1756,2122 @@ cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-
 
 ---
 
-*Tasks 5–11 (outbound messaging adapters, parsing adapter, application service, inbound adapter, domain model tests, cleanup) will be added in the next batch.*
+---
+
+### Task 5: Outbound messaging adapters
+
+**Files:**
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/dto/CancellationNoteReplyEvent.java`
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/HeaderSerializer.java`
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisher.java`
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/CancellationNoteEventPublisher.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/HeaderSerializerTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisherTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/CancellationNoteEventPublisherTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/SagaReplyPublisherTransactionTest.java`
+
+- [ ] **Step 1: Write failing tests for HeaderSerializer**
+
+```java
+// src/test/java/.../infrastructure/adapter/out/messaging/HeaderSerializerTest.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import java.util.Map;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class HeaderSerializerTest {
+    @Mock private ObjectMapper objectMapper;
+    @InjectMocks private HeaderSerializer headerSerializer;
+
+    @Test
+    void toJson_successfulSerialization() throws JsonProcessingException {
+        when(objectMapper.writeValueAsString(any())).thenReturn("{\"key\":\"value\"}");
+        assertEquals("{\"key\":\"value\"}", headerSerializer.toJson(Map.of("key", "value")));
+    }
+
+    @Test
+    void toJson_whenJsonProcessingException_throwsIllegalStateException() throws JsonProcessingException {
+        when(objectMapper.writeValueAsString(any())).thenThrow(new JsonProcessingException("error") {});
+        assertThrows(IllegalStateException.class, () -> headerSerializer.toJson(Map.of("key", "value")));
+    }
+}
+```
+
+- [ ] **Step 2: Create `CancellationNoteReplyEvent`**
+
+```java
+// src/main/java/.../infrastructure/adapter/out/messaging/dto/CancellationNoteReplyEvent.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging.dto;
+
+import com.wpanther.saga.domain.enums.ReplyStatus;
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.saga.domain.model.SagaReply;
+
+public class CancellationNoteReplyEvent extends SagaReply {
+    private static final long serialVersionUID = 1L;
+
+    public static CancellationNoteReplyEvent success(String sagaId, SagaStep sagaStep, String correlationId) {
+        return new CancellationNoteReplyEvent(sagaId, sagaStep, correlationId, ReplyStatus.SUCCESS);
+    }
+    public static CancellationNoteReplyEvent failure(String sagaId, SagaStep sagaStep, String correlationId, String errorMessage) {
+        return new CancellationNoteReplyEvent(sagaId, sagaStep, correlationId, errorMessage);
+    }
+    public static CancellationNoteReplyEvent compensated(String sagaId, SagaStep sagaStep, String correlationId) {
+        return new CancellationNoteReplyEvent(sagaId, sagaStep, correlationId, ReplyStatus.COMPENSATED);
+    }
+    private CancellationNoteReplyEvent(String sagaId, SagaStep sagaStep, String correlationId, ReplyStatus status) {
+        super(sagaId, sagaStep, correlationId, status);
+    }
+    private CancellationNoteReplyEvent(String sagaId, SagaStep sagaStep, String correlationId, String errorMessage) {
+        super(sagaId, sagaStep, correlationId, errorMessage);
+    }
+}
+```
+
+- [ ] **Step 3: Create `HeaderSerializer`**
+
+```java
+// src/main/java/.../infrastructure/adapter/out/messaging/HeaderSerializer.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+import java.util.Map;
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class HeaderSerializer {
+    private final ObjectMapper objectMapper;
+
+    public String toJson(Map<String, String> headers) {
+        try {
+            return objectMapper.writeValueAsString(headers);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize outbox headers to JSON: " + e.getMessage(), e);
+        }
+    }
+}
+```
+
+- [ ] **Step 4: Write failing tests for SagaReplyPublisher**
+
+```java
+// src/test/java/.../infrastructure/adapter/out/messaging/SagaReplyPublisherTest.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging.dto.CancellationNoteReplyEvent;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class SagaReplyPublisherTest {
+    @Mock private OutboxService outboxService;
+    @Mock private HeaderSerializer headerSerializer;
+    private SagaReplyPublisher publisher;
+
+    @BeforeEach
+    void setUp() {
+        publisher = new SagaReplyPublisher(outboxService, headerSerializer, "saga.reply.cancellation-note");
+    }
+
+    @Test
+    void testPublishSuccessCallsOutboxWithCorrectParameters() {
+        when(headerSerializer.toJson(any())).thenReturn("{\"status\":\"SUCCESS\"}");
+        publisher.publishSuccess("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+        verify(outboxService).saveWithRouting(
+            any(CancellationNoteReplyEvent.class), eq("ProcessedCancellationNote"),
+            eq("saga-1"), eq("saga.reply.cancellation-note"), eq("saga-1"), contains("SUCCESS"));
+    }
+
+    @Test
+    void testPublishFailureCallsOutboxWithCorrectParameters() {
+        when(headerSerializer.toJson(any())).thenReturn("{\"status\":\"FAILURE\"}");
+        publisher.publishFailure("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1", "Parse error");
+        verify(outboxService).saveWithRouting(
+            any(CancellationNoteReplyEvent.class), eq("ProcessedCancellationNote"),
+            eq("saga-1"), eq("saga.reply.cancellation-note"), eq("saga-1"), contains("FAILURE"));
+    }
+
+    @Test
+    void testPublishCompensatedCallsOutboxWithCorrectParameters() {
+        when(headerSerializer.toJson(any())).thenReturn("{\"status\":\"COMPENSATED\"}");
+        publisher.publishCompensated("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+        verify(outboxService).saveWithRouting(
+            any(CancellationNoteReplyEvent.class), eq("ProcessedCancellationNote"),
+            eq("saga-1"), eq("saga.reply.cancellation-note"), eq("saga-1"), contains("COMPENSATED"));
+    }
+
+    @Test
+    void testPublishSuccessUsesSagaIdAsPartitionKey() {
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+        publisher.publishSuccess("my-saga-id", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), any(), any(), captor.capture(), any());
+        assertEquals("my-saga-id", captor.getValue());
+    }
+
+    @Test
+    void testPublishReplyEventHasCorrectAggregateType() {
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+        publisher.publishFailure("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1", "error");
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), captor.capture(), any(), any(), any(), any());
+        assertEquals("ProcessedCancellationNote", captor.getValue());
+    }
+}
+```
+
+- [ ] **Step 5: Create `SagaReplyPublisher`**
+
+```java
+// src/main/java/.../infrastructure/adapter/out/messaging/SagaReplyPublisher.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.cancellationnote.processing.application.port.out.SagaReplyPort;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging.dto.CancellationNoteReplyEvent;
+import com.wpanther.cancellationnote.processing.infrastructure.config.KafkaTopicsProperties;
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import java.util.Map;
+
+@Component
+@Slf4j
+public class SagaReplyPublisher implements SagaReplyPort {
+
+    private static final String AGGREGATE_TYPE = "ProcessedCancellationNote";
+
+    private final OutboxService outboxService;
+    private final HeaderSerializer headerSerializer;
+    private final String replyTopic;
+
+    @Autowired
+    public SagaReplyPublisher(OutboxService outboxService, HeaderSerializer headerSerializer,
+                               KafkaTopicsProperties topics) {
+        this(outboxService, headerSerializer, topics.sagaReplyCancellationNote());
+    }
+
+    SagaReplyPublisher(OutboxService outboxService, HeaderSerializer headerSerializer, String replyTopic) {
+        this.outboxService = outboxService;
+        this.headerSerializer = headerSerializer;
+        this.replyTopic = replyTopic;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publishSuccess(String sagaId, SagaStep sagaStep, String correlationId) {
+        outboxService.saveWithRouting(
+            CancellationNoteReplyEvent.success(sagaId, sagaStep, correlationId),
+            AGGREGATE_TYPE, sagaId, replyTopic, sagaId,
+            headerSerializer.toJson(Map.of("sagaId", sagaId, "correlationId", correlationId, "status", "SUCCESS")));
+        log.info("Published SUCCESS saga reply for saga {} step {}", sagaId, sagaStep);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void publishFailure(String sagaId, SagaStep sagaStep, String correlationId, String errorMessage) {
+        outboxService.saveWithRouting(
+            CancellationNoteReplyEvent.failure(sagaId, sagaStep, correlationId, errorMessage),
+            AGGREGATE_TYPE, sagaId, replyTopic, sagaId,
+            headerSerializer.toJson(Map.of("sagaId", sagaId, "correlationId", correlationId, "status", "FAILURE")));
+        log.info("Published FAILURE saga reply for saga {} step {}: {}", sagaId, sagaStep, errorMessage);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publishCompensated(String sagaId, SagaStep sagaStep, String correlationId) {
+        outboxService.saveWithRouting(
+            CancellationNoteReplyEvent.compensated(sagaId, sagaStep, correlationId),
+            AGGREGATE_TYPE, sagaId, replyTopic, sagaId,
+            headerSerializer.toJson(Map.of("sagaId", sagaId, "correlationId", correlationId, "status", "COMPENSATED")));
+        log.info("Published COMPENSATED saga reply for saga {} step {}", sagaId, sagaStep);
+    }
+}
+```
+
+- [ ] **Step 6: Write failing tests for CancellationNoteEventPublisher**
+
+```java
+// src/test/java/.../infrastructure/adapter/out/messaging/CancellationNoteEventPublisherTest.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.cancellationnote.processing.application.dto.event.CancellationNoteProcessedEvent;
+import com.wpanther.cancellationnote.processing.domain.event.CancellationNoteProcessedDomainEvent;
+import com.wpanther.cancellationnote.processing.domain.model.Money;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import java.math.BigDecimal;
+import java.time.Instant;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class CancellationNoteEventPublisherTest {
+    @Mock private OutboxService outboxService;
+    @Mock private HeaderSerializer headerSerializer;
+    private CancellationNoteEventPublisher publisher;
+
+    @BeforeEach
+    void setUp() {
+        publisher = new CancellationNoteEventPublisher(outboxService, headerSerializer, "cancellationnote.processed");
+    }
+
+    private CancellationNoteProcessedDomainEvent makeEvent() {
+        return CancellationNoteProcessedDomainEvent.of(
+            "note-id-1", "CN-001", Money.of(new BigDecimal("10000.00"), "THB"),
+            "INV-001", "saga-1", "corr-1");
+    }
+
+    @Test
+    void testPublishCallsOutboxWithCorrectTopic() {
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+        publisher.publish(makeEvent());
+        ArgumentCaptor<String> topicCaptor = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), any(), topicCaptor.capture(), any(), any());
+        assertEquals("cancellationnote.processed", topicCaptor.getValue());
+    }
+
+    @Test
+    void testPublishTransformsToKafkaEvent() {
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+        publisher.publish(makeEvent());
+        verify(outboxService).saveWithRouting(
+            any(CancellationNoteProcessedEvent.class), eq("ProcessedCancellationNote"),
+            eq("note-id-1"), eq("cancellationnote.processed"), eq("note-id-1"), eq("{}"));
+    }
+
+    @Test
+    void testPublishUsesNoteIdAsAggregateIdAndPartitionKey() {
+        when(headerSerializer.toJson(any())).thenReturn("{}");
+        publisher.publish(makeEvent());
+        ArgumentCaptor<String> aggId = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> partKey = ArgumentCaptor.forClass(String.class);
+        verify(outboxService).saveWithRouting(any(), any(), aggId.capture(), any(), partKey.capture(), any());
+        assertEquals("note-id-1", aggId.getValue());
+        assertEquals("note-id-1", partKey.getValue());
+    }
+}
+```
+
+- [ ] **Step 7: Create `CancellationNoteEventPublisher`**
+
+```java
+// src/main/java/.../infrastructure/adapter/out/messaging/CancellationNoteEventPublisher.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.cancellationnote.processing.application.dto.event.CancellationNoteProcessedEvent;
+import com.wpanther.cancellationnote.processing.application.port.out.CancellationNoteEventPublishingPort;
+import com.wpanther.cancellationnote.processing.domain.event.CancellationNoteProcessedDomainEvent;
+import com.wpanther.cancellationnote.processing.infrastructure.config.KafkaTopicsProperties;
+import com.wpanther.saga.infrastructure.outbox.OutboxService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import java.util.Map;
+
+@Component
+@Slf4j
+public class CancellationNoteEventPublisher implements CancellationNoteEventPublishingPort {
+
+    private static final String AGGREGATE_TYPE = "ProcessedCancellationNote";
+
+    private final OutboxService outboxService;
+    private final HeaderSerializer headerSerializer;
+    private final String cancellationNoteProcessedTopic;
+
+    @Autowired
+    public CancellationNoteEventPublisher(OutboxService outboxService, HeaderSerializer headerSerializer,
+                                           KafkaTopicsProperties topics) {
+        this(outboxService, headerSerializer, topics.cancellationNoteProcessed());
+    }
+
+    CancellationNoteEventPublisher(OutboxService outboxService, HeaderSerializer headerSerializer,
+                                    String cancellationNoteProcessedTopic) {
+        this.outboxService = outboxService;
+        this.headerSerializer = headerSerializer;
+        this.cancellationNoteProcessedTopic = cancellationNoteProcessedTopic;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publish(CancellationNoteProcessedDomainEvent event) {
+        CancellationNoteProcessedEvent kafkaEvent = new CancellationNoteProcessedEvent(
+            event.noteId(), event.cancellationNoteNumber(),
+            event.total().amount(), event.total().currency(),
+            event.cancelledInvoiceNumber(), event.correlationId());
+
+        outboxService.saveWithRouting(
+            kafkaEvent, AGGREGATE_TYPE, event.noteId(),
+            cancellationNoteProcessedTopic, event.noteId(),
+            headerSerializer.toJson(Map.of(
+                "correlationId", event.correlationId(),
+                "cancellationNoteNumber", event.cancellationNoteNumber())));
+
+        log.info("Published CancellationNoteProcessedEvent to outbox: {}", event.cancellationNoteNumber());
+    }
+}
+```
+
+- [ ] **Step 8: Write `SagaReplyPublisherTransactionTest` (integration test)**
+
+```java
+// src/test/java/.../infrastructure/adapter/out/messaging/SagaReplyPublisherTransactionTest.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.messaging;
+
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.out.persistence.outbox.OutboxEventEntity;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.out.persistence.outbox.SpringDataOutboxRepository;
+import com.wpanther.saga.domain.enums.SagaStep;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.UnexpectedRollbackException;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.util.List;
+import java.util.UUID;
+import static org.junit.jupiter.api.Assertions.*;
+
+@SpringBootTest
+@ActiveProfiles("test")
+class SagaReplyPublisherTransactionTest {
+
+    @Autowired private SagaReplyPublisher sagaReplyPublisher;
+    @Autowired private SpringDataOutboxRepository outboxRepository;
+    @Autowired private PlatformTransactionManager transactionManager;
+
+    @AfterEach
+    void cleanup() { outboxRepository.deleteAll(); }
+
+    @Test
+    void publishFailure_commitsOutboxEntry_evenWhenOuterTransactionIsRollbackOnly() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        try {
+            tx.execute(status -> {
+                status.setRollbackOnly();
+                sagaReplyPublisher.publishFailure(sagaId, SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1", "error");
+                return null;
+            });
+        } catch (UnexpectedRollbackException | TransactionSystemException ignored) {}
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+            .filter(e -> e.getAggregateId().equals(sagaId)).toList();
+        assertFalse(entries.isEmpty(),
+            "publishFailure() must commit outbox entry even when outer transaction is rolled back");
+    }
+
+    @Test
+    void publishFailure_outboxEntry_containsFailureStatus() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        try {
+            tx.execute(status -> {
+                status.setRollbackOnly();
+                sagaReplyPublisher.publishFailure(sagaId, SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1", "some error");
+                return null;
+            });
+        } catch (UnexpectedRollbackException | TransactionSystemException ignored) {}
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+            .filter(e -> e.getAggregateId().equals(sagaId)).toList();
+        assertFalse(entries.isEmpty());
+        assertTrue(entries.get(0).getPayload().contains("FAILURE"));
+    }
+
+    @Test
+    void publishSuccess_rollsBackOutboxEntry_whenOuterTransactionRollsBack() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        try {
+            tx.execute(status -> {
+                sagaReplyPublisher.publishSuccess(sagaId, SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+                status.setRollbackOnly();
+                return null;
+            });
+        } catch (UnexpectedRollbackException | TransactionSystemException ignored) {}
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+            .filter(e -> e.getAggregateId().equals(sagaId)).toList();
+        assertTrue(entries.isEmpty(),
+            "publishSuccess() must roll back with the outer transaction");
+    }
+
+    @Test
+    void publishCompensated_commitsOutboxEntry_togetherWithOuterTransaction() {
+        String sagaId = UUID.randomUUID().toString();
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        tx.execute(status -> {
+            sagaReplyPublisher.publishCompensated(sagaId, SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+            return null;
+        });
+
+        List<OutboxEventEntity> entries = outboxRepository.findAll().stream()
+            .filter(e -> e.getAggregateId().equals(sagaId)).toList();
+        assertFalse(entries.isEmpty());
+    }
+}
+```
+
+- [ ] **Step 9: Run messaging adapter tests**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn test \
+     -Dtest="HeaderSerializerTest,SagaReplyPublisherTest,CancellationNoteEventPublisherTest,SagaReplyPublisherTransactionTest" \
+     2>&1 | tail -15
+```
+
+Expected: All tests pass (`Failures: 0, Errors: 0`).
+
+- [ ] **Step 10: Commit**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && git add \
+     src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/ \
+     src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/messaging/ \
+  && git commit -m "feat: add outbound messaging adapters (SagaReplyPublisher, CancellationNoteEventPublisher, HeaderSerializer)"
+```
+
+---
+
+### Task 6: Parsing adapter
+
+**Files:**
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/parsing/CancellationNoteParserServiceImpl.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/parsing/CancellationNoteParserServiceImplTest.java`
+
+- [ ] **Step 1: Write failing test**
+
+```java
+// src/test/java/.../infrastructure/adapter/out/parsing/CancellationNoteParserServiceImplTest.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.parsing;
+
+import com.wpanther.cancellationnote.processing.domain.port.out.CancellationNoteParserPort;
+import com.wpanther.cancellationnote.processing.domain.port.out.CancellationNoteParserPort.CancellationNoteParsingException;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CancellationNoteParserServiceImplTest {
+
+    private CancellationNoteParserServiceImpl parserService;
+
+    @BeforeEach
+    void setUp() throws CancellationNoteParsingException {
+        parserService = new CancellationNoteParserServiceImpl();
+    }
+
+    @Test
+    void parse_withNullXml_throwsCancellationNoteParsingException() {
+        assertThrows(CancellationNoteParsingException.class,
+            () -> parserService.parse(null, "source-1"));
+    }
+
+    @Test
+    void parse_withBlankXml_throwsCancellationNoteParsingException() {
+        assertThrows(CancellationNoteParsingException.class,
+            () -> parserService.parse("   ", "source-1"));
+    }
+
+    @Test
+    void parse_withInvalidXml_throwsCancellationNoteParsingException() {
+        assertThrows(CancellationNoteParsingException.class,
+            () -> parserService.parse("<invalid>not-a-cancellation-note</invalid>", "source-1"));
+    }
+
+    @Test
+    void constructor_initializesJaxbContext_withoutException() {
+        // JAXBContext initialization must succeed for a valid cancellation-note context path
+        assertDoesNotThrow(() -> new CancellationNoteParserServiceImpl());
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn test -Dtest=CancellationNoteParserServiceImplTest 2>&1 | tail -10
+```
+
+Expected: FAIL (class not found in new package).
+
+- [ ] **Step 3: Create `CancellationNoteParserServiceImpl` in the new package**
+
+This is a copy of `infrastructure/service/CancellationNoteParserServiceImpl.java` with three changes:
+1. Package declaration updated to `infrastructure.adapter.out.parsing`
+2. Implements `CancellationNoteParserPort` instead of `CancellationNoteParserService`
+3. Method renamed from `parseCancellationNote` to `parse`
+4. Exception type changed from `CancellationNoteParserService.CancellationNoteParsingException` to `CancellationNoteParserPort.CancellationNoteParsingException`
+
+```java
+// src/main/java/.../infrastructure/adapter/out/parsing/CancellationNoteParserServiceImpl.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.out.parsing;
+
+import com.wpanther.cancellationnote.processing.domain.model.*;
+import com.wpanther.cancellationnote.processing.domain.port.out.CancellationNoteParserPort;
+import com.wpanther.etax.generated.cancellationnote.ram.*;
+import com.wpanther.etax.generated.cancellationnote.rsm.CancellationNote_CrossIndustryInvoiceType;
+import com.wpanther.etax.generated.cancellationnote.rsm.impl.CancellationNote_CrossIndustryInvoiceTypeImpl;
+import jakarta.xml.bind.JAXBContext;
+import jakarta.xml.bind.JAXBException;
+import jakarta.xml.bind.Unmarshaller;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import javax.xml.datatype.XMLGregorianCalendar;
+import java.io.StringReader;
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+@Slf4j
+@Service
+public class CancellationNoteParserServiceImpl implements CancellationNoteParserPort {
+
+    private final JAXBContext jaxbContext;
+
+    public CancellationNoteParserServiceImpl() throws CancellationNoteParsingException {
+        try {
+            String contextPath = "com.wpanther.etax.generated.cancellationnote.rsm.impl" +
+                               ":com.wpanther.etax.generated.cancellationnote.ram.impl" +
+                               ":com.wpanther.etax.generated.common.qdt.impl" +
+                               ":com.wpanther.etax.generated.common.udt.impl";
+            this.jaxbContext = JAXBContext.newInstance(contextPath);
+        } catch (JAXBException e) {
+            throw new CancellationNoteParsingException("Failed to initialize XML parser", e);
+        }
+    }
+
+    @Override
+    public ProcessedCancellationNote parse(String xmlContent, String sourceNoteId)
+            throws CancellationNoteParsingException {
+        log.debug("Starting XML parsing for source note ID: {}", sourceNoteId);
+        try {
+            CancellationNote_CrossIndustryInvoiceType jaxbNote = unmarshalXml(xmlContent);
+            ExchangedDocumentType document = jaxbNote.getExchangedDocument();
+            if (document == null) throw new CancellationNoteParsingException(
+                "Cancellation note XML missing required ExchangedDocument element");
+            SupplyChainTradeTransactionType transaction = jaxbNote.getSupplyChainTradeTransaction();
+            if (transaction == null) throw new CancellationNoteParsingException(
+                "Cancellation note XML missing required SupplyChainTradeTransaction element");
+            LocalDate issueDate = extractIssueDate(document);
+            ProcessedCancellationNote note = ProcessedCancellationNote.builder()
+                .id(CancellationNoteId.generate())
+                .sourceNoteId(sourceNoteId)
+                .cancellationNoteNumber(extractCancellationNoteNumber(document))
+                .issueDate(issueDate)
+                .cancellationDate(issueDate)
+                .seller(extractSeller(transaction))
+                .buyer(extractBuyer(transaction))
+                .items(extractLineItems(transaction))
+                .currency(extractCurrency(transaction))
+                .cancelledInvoiceNumber(extractCancelledInvoiceNumber(document))
+                .originalXml(xmlContent)
+                .build();
+            log.info("Successfully parsed cancellation note {} with {} line items",
+                note.cancellationNoteNumber(), note.items().size());
+            return note;
+        } catch (CancellationNoteParsingException e) {
+            log.error("Failed to parse cancellation note XML for source ID {}: {}", sourceNoteId, e.getMessage());
+            throw e;
+        } catch (Exception e) {
+            log.error("Unexpected error parsing cancellation note XML for source ID " + sourceNoteId, e);
+            throw new CancellationNoteParsingException("Unexpected error during cancellation note parsing", e);
+        }
+    }
+
+    private CancellationNote_CrossIndustryInvoiceType unmarshalXml(String xmlContent)
+            throws CancellationNoteParsingException {
+        if (xmlContent == null || xmlContent.isBlank())
+            throw new CancellationNoteParsingException("XML content is null or empty");
+        try {
+            Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
+            Object result = unmarshaller.unmarshal(new StringReader(xmlContent));
+            if (result instanceof jakarta.xml.bind.JAXBElement<?> jaxbElement) result = jaxbElement.getValue();
+            if (!(result instanceof CancellationNote_CrossIndustryInvoiceType))
+                throw new CancellationNoteParsingException("Unexpected root element: " + result.getClass().getName());
+            return (CancellationNote_CrossIndustryInvoiceType) result;
+        } catch (JAXBException e) {
+            throw new CancellationNoteParsingException("Failed to parse XML: " + e.getMessage(), e);
+        }
+    }
+
+    private String extractCancellationNoteNumber(ExchangedDocumentType document) throws CancellationNoteParsingException {
+        if (document.getID() == null || document.getID().getValue() == null)
+            throw new CancellationNoteParsingException("Cancellation note number (ID) is missing");
+        return document.getID().getValue();
+    }
+
+    private String extractCancelledInvoiceNumber(ExchangedDocumentType document) throws CancellationNoteParsingException {
+        List<ReferencedDocumentType> refs = document.getIncludedReferencedDocument();
+        if (refs != null && !refs.isEmpty()) {
+            ReferencedDocumentType ref = refs.get(0);
+            if (ref.getIssuerAssignedID() != null && ref.getIssuerAssignedID().getValue() != null)
+                return ref.getIssuerAssignedID().getValue();
+        }
+        throw new CancellationNoteParsingException("Cancelled invoice number is missing");
+    }
+
+    private LocalDate extractIssueDate(ExchangedDocumentType document) throws CancellationNoteParsingException {
+        XMLGregorianCalendar issueDateTime = document.getIssueDateTime();
+        if (issueDateTime == null) throw new CancellationNoteParsingException("Issue date/time is missing");
+        return LocalDate.of(issueDateTime.getYear(), issueDateTime.getMonth(), issueDateTime.getDay());
+    }
+
+    private Party extractSeller(SupplyChainTradeTransactionType transaction) throws CancellationNoteParsingException {
+        HeaderTradeAgreementType agreement = transaction.getApplicableHeaderTradeAgreement();
+        if (agreement == null || agreement.getSellerTradeParty() == null)
+            throw new CancellationNoteParsingException("Seller information is missing");
+        return mapParty(agreement.getSellerTradeParty(), "Seller");
+    }
+
+    private Party extractBuyer(SupplyChainTradeTransactionType transaction) throws CancellationNoteParsingException {
+        HeaderTradeAgreementType agreement = transaction.getApplicableHeaderTradeAgreement();
+        if (agreement == null || agreement.getBuyerTradeParty() == null)
+            throw new CancellationNoteParsingException("Buyer information is missing");
+        return mapParty(agreement.getBuyerTradeParty(), "Buyer");
+    }
+
+    private Party mapParty(TradePartyType jaxbParty, String partyType) throws CancellationNoteParsingException {
+        String name = Optional.ofNullable(jaxbParty.getName())
+            .map(n -> n.getValue()).orElseThrow(() -> new CancellationNoteParsingException(partyType + " name is missing"));
+        TaxIdentifier taxId = extractTaxIdentifier(jaxbParty, partyType);
+        Address address = extractAddress(jaxbParty, partyType);
+        String email = null;
+        List<TradeContactType> contacts = jaxbParty.getDefinedTradeContact();
+        if (contacts != null && !contacts.isEmpty()) {
+            TradeContactType contact = contacts.get(0);
+            if (contact.getEmailURIUniversalCommunication() != null &&
+                contact.getEmailURIUniversalCommunication().getURIID() != null)
+                email = contact.getEmailURIUniversalCommunication().getURIID().getValue();
+        }
+        return Party.of(name, taxId, address, email);
+    }
+
+    private TaxIdentifier extractTaxIdentifier(TradePartyType jaxbParty, String partyType) throws CancellationNoteParsingException {
+        TaxRegistrationType taxReg = jaxbParty.getSpecifiedTaxRegistration();
+        if (taxReg == null || taxReg.getID() == null || taxReg.getID().getValue() == null)
+            throw new CancellationNoteParsingException(partyType + " tax ID is missing");
+        return TaxIdentifier.of(taxReg.getID().getValue(), Optional.ofNullable(taxReg.getID().getSchemeID()).orElse("VAT"));
+    }
+
+    private Address extractAddress(TradePartyType jaxbParty, String partyType) throws CancellationNoteParsingException {
+        TradeAddressType addr = jaxbParty.getPostalTradeAddress();
+        if (addr == null) throw new CancellationNoteParsingException(partyType + " address is missing");
+        String street = Optional.ofNullable(addr.getLineOne()).map(l -> l.getValue()).orElse(null);
+        String city = Optional.ofNullable(addr.getCityName()).map(c -> c.getValue()).orElse(null);
+        String postal = Optional.ofNullable(addr.getPostcodeCode()).map(p -> p.getValue()).orElse(null);
+        if (addr.getCountryID() == null || addr.getCountryID().getValue() == null)
+            throw new CancellationNoteParsingException(partyType + " country is missing");
+        return Address.of(street, city, postal, addr.getCountryID().getValue().value());
+    }
+
+    private List<LineItem> extractLineItems(SupplyChainTradeTransactionType transaction) throws CancellationNoteParsingException {
+        List<SupplyChainTradeLineItemType> jaxbItems = transaction.getIncludedSupplyChainTradeLineItem();
+        if (jaxbItems == null || jaxbItems.isEmpty())
+            throw new CancellationNoteParsingException("Cancellation note must have at least one line item");
+        String currency = extractCurrency(transaction);
+        List<LineItem> items = new ArrayList<>();
+        for (int i = 0; i < jaxbItems.size(); i++) {
+            try { items.add(mapLineItem(jaxbItems.get(i), currency)); }
+            catch (Exception e) { throw new CancellationNoteParsingException("Failed to parse line item " + (i + 1) + ": " + e.getMessage(), e); }
+        }
+        return items;
+    }
+
+    private LineItem mapLineItem(SupplyChainTradeLineItemType jaxbItem, String currency) throws CancellationNoteParsingException {
+        TradeProductType product = jaxbItem.getSpecifiedTradeProduct();
+        if (product == null || product.getName() == null || product.getName().isEmpty())
+            throw new CancellationNoteParsingException("Line item product name is missing");
+        String description = product.getName().get(0).getValue();
+        LineTradeDeliveryType delivery = jaxbItem.getSpecifiedLineTradeDelivery();
+        if (delivery == null || delivery.getBilledQuantity() == null)
+            throw new CancellationNoteParsingException("Line item quantity is missing");
+        int quantity = delivery.getBilledQuantity().getValue().intValue();
+        LineTradeAgreementType agreement = jaxbItem.getSpecifiedLineTradeAgreement();
+        if (agreement == null || agreement.getGrossPriceProductTradePrice() == null ||
+            agreement.getGrossPriceProductTradePrice().getChargeAmount() == null ||
+            agreement.getGrossPriceProductTradePrice().getChargeAmount().isEmpty())
+            throw new CancellationNoteParsingException("Line item unit price is missing");
+        Money unitPrice = Money.of(agreement.getGrossPriceProductTradePrice().getChargeAmount().get(0).getValue(), currency);
+        BigDecimal taxRate = BigDecimal.ZERO;
+        LineTradeSettlementType settlement = jaxbItem.getSpecifiedLineTradeSettlement();
+        if (settlement != null && settlement.getApplicableTradeTax() != null &&
+            !settlement.getApplicableTradeTax().isEmpty()) {
+            TradeTaxType tax = settlement.getApplicableTradeTax().get(0);
+            if (tax.getCalculatedRate() != null) taxRate = tax.getCalculatedRate();
+        }
+        return new LineItem(description, quantity, unitPrice, taxRate);
+    }
+
+    private String extractCurrency(SupplyChainTradeTransactionType transaction) throws CancellationNoteParsingException {
+        HeaderTradeSettlementType settlement = transaction.getApplicableHeaderTradeSettlement();
+        if (settlement == null || settlement.getInvoiceCurrencyCode() == null ||
+            settlement.getInvoiceCurrencyCode().getValue() == null)
+            throw new CancellationNoteParsingException("Cancellation note currency is missing");
+        String currency = settlement.getInvoiceCurrencyCode().getValue().value();
+        if (currency == null || currency.length() != 3)
+            throw new CancellationNoteParsingException("Invalid currency code: " + currency);
+        return currency;
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn test -Dtest=CancellationNoteParserServiceImplTest 2>&1 | tail -10
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && git add \
+     src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/parsing/ \
+     src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/out/parsing/ \
+  && git commit -m "feat: add parsing adapter (CancellationNoteParserServiceImpl implements CancellationNoteParserPort)"
+```
+
+---
+
+### Task 7: Application service refactor
+
+**Files:**
+- Modify: `src/main/java/com/wpanther/cancellationnote/processing/application/service/CancellationNoteProcessingService.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/application/service/CancellationNoteProcessingServiceTest.java`
+
+- [ ] **Step 1: Write failing tests**
+
+```java
+// src/test/java/.../application/service/CancellationNoteProcessingServiceTest.java
+package com.wpanther.cancellationnote.processing.application.service;
+
+import com.wpanther.cancellationnote.processing.application.port.in.CompensateCancellationNoteUseCase;
+import com.wpanther.cancellationnote.processing.application.port.in.ProcessCancellationNoteUseCase;
+import com.wpanther.cancellationnote.processing.application.port.out.CancellationNoteEventPublishingPort;
+import com.wpanther.cancellationnote.processing.application.port.out.SagaReplyPort;
+import com.wpanther.cancellationnote.processing.domain.event.CancellationNoteProcessedDomainEvent;
+import com.wpanther.cancellationnote.processing.domain.model.*;
+import com.wpanther.cancellationnote.processing.domain.port.out.CancellationNoteParserPort;
+import com.wpanther.cancellationnote.processing.domain.port.out.ProcessedCancellationNoteRepository;
+import com.wpanther.saga.domain.enums.SagaStep;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+import java.math.BigDecimal;
+import java.sql.SQLException;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Optional;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class CancellationNoteProcessingServiceTest {
+
+    @Mock private ProcessedCancellationNoteRepository noteRepository;
+    @Mock private CancellationNoteParserPort parserPort;
+    @Mock private CancellationNoteEventPublishingPort eventPublisher;
+    @Mock private SagaReplyPort sagaReplyPort;
+    @Mock private PlatformTransactionManager transactionManager;
+
+    private CancellationNoteProcessingService service;
+    private ProcessedCancellationNote validNote;
+
+    @BeforeEach
+    void setUp() {
+        service = new CancellationNoteProcessingService(
+            noteRepository, parserPort, eventPublisher, sagaReplyPort,
+            new SimpleMeterRegistry(), transactionManager);
+
+        Party seller = Party.of("Seller Co", TaxIdentifier.of("1234567890", "VAT"),
+            new Address("123 St", "Bangkok", "10110", "TH"), null);
+        Party buyer = Party.of("Buyer Co", TaxIdentifier.of("9876543210", "VAT"),
+            new Address("456 Rd", "Chiang Mai", "50000", "TH"), null);
+        LineItem item = new LineItem("Service", 1, Money.of(new BigDecimal("1000.00"), "THB"), new BigDecimal("7.00"));
+
+        validNote = ProcessedCancellationNote.builder()
+            .id(CancellationNoteId.generate())
+            .sourceNoteId("intake-123")
+            .cancellationNoteNumber("CN-001")
+            .issueDate(LocalDate.of(2025, 1, 1))
+            .cancellationDate(LocalDate.of(2025, 1, 1))
+            .seller(seller).buyer(buyer).items(List.of(item))
+            .currency("THB").cancelledInvoiceNumber("INV-001")
+            .originalXml("<xml/>")
+            .build();
+    }
+
+    @Test
+    void process_success_savesAndPublishes() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserPort.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any())).thenReturn(validNote);
+
+        service.process("intake-123", "<xml/>", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+
+        verify(noteRepository).findBySourceNoteId("intake-123");
+        verify(parserPort).parse("<xml/>", "intake-123");
+        verify(noteRepository, times(2)).save(any());
+        verify(eventPublisher).publish(any(CancellationNoteProcessedDomainEvent.class));
+        verify(sagaReplyPort).publishSuccess("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+    }
+
+    @Test
+    void process_idempotent_completed_publishesSuccessWithoutReprocessing() throws Exception {
+        ProcessedCancellationNote completed = ProcessedCancellationNote.builder()
+            .id(CancellationNoteId.generate()).sourceNoteId("intake-123")
+            .cancellationNoteNumber("CN-001").issueDate(LocalDate.of(2025,1,1))
+            .cancellationDate(LocalDate.of(2025,1,1))
+            .seller(validNote.seller()).buyer(validNote.buyer()).items(validNote.items())
+            .currency("THB").cancelledInvoiceNumber("INV-001").originalXml("<xml/>")
+            .status(ProcessingStatus.COMPLETED).build();
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.of(completed));
+
+        service.process("intake-123", "<xml/>", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+
+        verify(parserPort, never()).parse(anyString(), anyString());
+        verify(noteRepository, never()).save(any());
+        verify(eventPublisher, never()).publish(any());
+        verify(sagaReplyPort).publishSuccess("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+    }
+
+    @Test
+    void process_resumesFromProcessingState() throws Exception {
+        ProcessedCancellationNote processing = ProcessedCancellationNote.builder()
+            .id(CancellationNoteId.generate()).sourceNoteId("intake-123")
+            .cancellationNoteNumber("CN-001").issueDate(LocalDate.of(2025,1,1))
+            .cancellationDate(LocalDate.of(2025,1,1))
+            .seller(validNote.seller()).buyer(validNote.buyer()).items(validNote.items())
+            .currency("THB").cancelledInvoiceNumber("INV-001").originalXml("<xml/>")
+            .status(ProcessingStatus.PROCESSING).build();
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.of(processing));
+
+        service.process("intake-123", "<xml/>", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+
+        verify(parserPort, never()).parse(anyString(), anyString());
+        verify(noteRepository, times(1)).save(any());
+        verify(eventPublisher).publish(any(CancellationNoteProcessedDomainEvent.class));
+        verify(sagaReplyPort).publishSuccess("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+        assertEquals(ProcessingStatus.COMPLETED, processing.status());
+    }
+
+    @Test
+    void process_parsingError_publishesFailureAndThrows() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserPort.parse(anyString(), anyString()))
+            .thenThrow(new CancellationNoteParserPort.CancellationNoteParsingException("Parse error"));
+
+        assertThrows(ProcessCancellationNoteUseCase.CancellationNoteProcessingException.class,
+            () -> service.process("intake-123", "<xml/>", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1"));
+
+        verify(sagaReplyPort).publishFailure(eq("saga-1"), eq(SagaStep.PROCESS_CANCELLATION_NOTE),
+            eq("corr-1"), contains("Parse error"));
+        verify(eventPublisher, never()).publish(any());
+    }
+
+    @Test
+    void process_databaseError_publishesFailureAndThrows() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserPort.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any())).thenThrow(new RuntimeException("DB error"));
+
+        assertThrows(ProcessCancellationNoteUseCase.CancellationNoteProcessingException.class,
+            () -> service.process("intake-123", "<xml/>", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1"));
+
+        verify(sagaReplyPort).publishFailure(eq("saga-1"), eq(SagaStep.PROCESS_CANCELLATION_NOTE),
+            eq("corr-1"), contains("Processing error"));
+    }
+
+    @Test
+    void process_raceConditionResolvesAsSuccess_whenRecordFoundOnRecheck() throws Exception {
+        SQLException sqlCause = new SQLException(
+            "ERROR: duplicate key value violates unique constraint " +
+            "\"uq_processed_cancellation_notes_source_note_id\"", "23505");
+        when(transactionManager.getTransaction(any())).thenReturn(mock(TransactionStatus.class));
+        when(noteRepository.findBySourceNoteId(anyString()))
+            .thenReturn(Optional.empty())
+            .thenReturn(Optional.of(validNote));
+        when(parserPort.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any())).thenThrow(new DuplicateKeyException("duplicate key", sqlCause));
+
+        ProcessCancellationNoteUseCase.CancellationNoteProcessingException ex =
+            assertThrows(ProcessCancellationNoteUseCase.CancellationNoteProcessingException.class,
+                () -> service.process("intake-123", "<xml/>", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1"));
+        assertInstanceOf(DataIntegrityViolationException.class, ex.getCause());
+
+        verify(sagaReplyPort).publishSuccess("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+        verify(sagaReplyPort, never()).publishFailure(any(), any(), any(), any());
+    }
+
+    @Test
+    void process_duplicateKeyOnNonIdempotentConstraint_publishesFailure() throws Exception {
+        when(noteRepository.findBySourceNoteId(anyString())).thenReturn(Optional.empty());
+        when(parserPort.parse(anyString(), anyString())).thenReturn(validNote);
+        when(noteRepository.save(any()))
+            .thenThrow(new DuplicateKeyException("duplicate key violation \"idx_cn_number_unique\""));
+
+        assertThrows(ProcessCancellationNoteUseCase.CancellationNoteProcessingException.class,
+            () -> service.process("intake-123", "<xml/>", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1"));
+
+        verify(sagaReplyPort).publishFailure(eq("saga-1"), eq(SagaStep.PROCESS_CANCELLATION_NOTE),
+            eq("corr-1"), contains("Constraint violation"));
+        verify(noteRepository, times(1)).findBySourceNoteId(anyString());
+    }
+
+    @Test
+    void compensate_deletesAndPublishesCompensated() throws Exception {
+        when(noteRepository.findBySourceNoteId("intake-123")).thenReturn(Optional.of(validNote));
+
+        service.compensate("intake-123", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+
+        verify(noteRepository).deleteById(validNote.id());
+        verify(sagaReplyPort).publishCompensated("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+    }
+
+    @Test
+    void compensate_notFound_publishesCompensatedIdempotently() throws Exception {
+        when(noteRepository.findBySourceNoteId("intake-missing")).thenReturn(Optional.empty());
+
+        service.compensate("intake-missing", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+
+        verify(noteRepository, never()).deleteById(any());
+        verify(sagaReplyPort).publishCompensated("saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+    }
+
+    @Test
+    void compensate_deleteThrows_publishesFailureAndRethrows() {
+        when(noteRepository.findBySourceNoteId("intake-123")).thenReturn(Optional.of(validNote));
+        doThrow(new RuntimeException("DB error")).when(noteRepository).deleteById(any());
+
+        assertThrows(CompensateCancellationNoteUseCase.CancellationNoteCompensationException.class,
+            () -> service.compensate("intake-123", "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1"));
+
+        verify(sagaReplyPort).publishFailure(eq("saga-1"), eq(SagaStep.PROCESS_CANCELLATION_NOTE),
+            eq("corr-1"), contains("Compensation failed"));
+    }
+}
+```
+
+- [ ] **Step 2: Overwrite `CancellationNoteProcessingService` with the refactored version**
+
+```java
+// src/main/java/.../application/service/CancellationNoteProcessingService.java
+package com.wpanther.cancellationnote.processing.application.service;
+
+import com.wpanther.cancellationnote.processing.application.port.in.CompensateCancellationNoteUseCase;
+import com.wpanther.cancellationnote.processing.application.port.in.ProcessCancellationNoteUseCase;
+import com.wpanther.cancellationnote.processing.application.port.out.CancellationNoteEventPublishingPort;
+import com.wpanther.cancellationnote.processing.application.port.out.SagaReplyPort;
+import com.wpanther.cancellationnote.processing.domain.event.CancellationNoteProcessedDomainEvent;
+import com.wpanther.cancellationnote.processing.domain.model.ProcessedCancellationNote;
+import com.wpanther.cancellationnote.processing.domain.model.ProcessingStatus;
+import com.wpanther.cancellationnote.processing.domain.port.out.CancellationNoteParserPort;
+import com.wpanther.cancellationnote.processing.domain.port.out.ProcessedCancellationNoteRepository;
+import com.wpanther.saga.domain.enums.SagaStep;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.sql.SQLException;
+import java.util.Optional;
+
+@Service
+@Slf4j
+public class CancellationNoteProcessingService
+        implements ProcessCancellationNoteUseCase, CompensateCancellationNoteUseCase {
+
+    private final ProcessedCancellationNoteRepository noteRepository;
+    private final CancellationNoteParserPort parserPort;
+    private final CancellationNoteEventPublishingPort eventPublisher;
+    private final SagaReplyPort sagaReplyPort;
+    private final MeterRegistry meterRegistry;
+    private final TransactionTemplate requiresNewTemplate;
+
+    private final Counter processSuccessCounter;
+    private final Counter processFailureCounter;
+    private final Counter processIdempotentCounter;
+    private final Counter processRaceConditionResolvedCounter;
+    private final Counter compensateSuccessCounter;
+    private final Counter compensateIdempotentCounter;
+    private final Counter compensateFailureCounter;
+    private final Timer processingTimer;
+
+    public CancellationNoteProcessingService(
+            ProcessedCancellationNoteRepository noteRepository,
+            CancellationNoteParserPort parserPort,
+            CancellationNoteEventPublishingPort eventPublisher,
+            SagaReplyPort sagaReplyPort,
+            MeterRegistry meterRegistry,
+            PlatformTransactionManager transactionManager) {
+        this.noteRepository = noteRepository;
+        this.parserPort = parserPort;
+        this.eventPublisher = eventPublisher;
+        this.sagaReplyPort = sagaReplyPort;
+        this.meterRegistry = meterRegistry;
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.requiresNewTemplate = template;
+
+        this.processSuccessCounter = Counter.builder("cancellationNote.processing.success")
+            .description("Number of successfully processed cancellation notes").register(meterRegistry);
+        this.processFailureCounter = Counter.builder("cancellationNote.processing.failure")
+            .description("Number of failed cancellation note processing attempts").register(meterRegistry);
+        this.processIdempotentCounter = Counter.builder("cancellationNote.processing.idempotent")
+            .description("Number of duplicate processing requests handled idempotently").register(meterRegistry);
+        this.processRaceConditionResolvedCounter = Counter.builder("cancellationNote.processing.race_condition_resolved")
+            .description("Number of DuplicateKeyExceptions on source_note_id resolved as concurrent inserts").register(meterRegistry);
+        this.compensateSuccessCounter = Counter.builder("cancellationNote.compensation.success")
+            .description("Number of successful compensations").register(meterRegistry);
+        this.compensateIdempotentCounter = Counter.builder("cancellationNote.compensation.idempotent")
+            .description("Number of duplicate compensation commands for an already-deleted note").register(meterRegistry);
+        this.compensateFailureCounter = Counter.builder("cancellationNote.compensation.failure")
+            .description("Number of failed compensation attempts").register(meterRegistry);
+        this.processingTimer = Timer.builder("cancellationNote.processing.duration")
+            .description("Time taken to process cancellation notes").register(meterRegistry);
+    }
+
+    @Override
+    @Transactional
+    public void process(String documentId, String xmlContent, String sagaId,
+                        SagaStep sagaStep, String correlationId) throws CancellationNoteProcessingException {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            processNoteForSagaInternal(documentId, xmlContent, sagaId, sagaStep, correlationId);
+        } catch (CancellationNoteParserPort.CancellationNoteParsingException e) {
+            processFailureCounter.increment();
+            sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId, "Parse error: " + e.toString());
+            throw new CancellationNoteProcessingException("Failed to parse cancellation note: " + e.toString(), e);
+        } catch (DuplicateKeyException e) {
+            if (!isSourceNoteIdViolation(e)) {
+                processFailureCounter.increment();
+                log.error("Duplicate key on non-idempotent constraint for document {}: {}", documentId, e.toString());
+                sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId,
+                    "Constraint violation for document " + documentId + ": " + e.toString());
+                throw new CancellationNoteProcessingException("Constraint violation for document " + documentId, e);
+            }
+            log.warn("DuplicateKeyException on source_note_id for document {} — re-checking for concurrent insert", documentId);
+            requiresNewTemplate.execute(txStatus -> {
+                Optional<ProcessedCancellationNote> existing = noteRepository.findBySourceNoteId(documentId);
+                if (existing.isPresent()) {
+                    log.warn("Race condition resolved: document {} already committed by concurrent thread — replying SUCCESS", documentId);
+                    processRaceConditionResolvedCounter.increment();
+                    sagaReplyPort.publishSuccess(sagaId, sagaStep, correlationId);
+                } else {
+                    log.error("DuplicateKeyException on source_note_id for document {} but no record found", documentId);
+                    processFailureCounter.increment();
+                    sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId,
+                        "Duplicate key violation for document " + documentId + ": " + e.toString());
+                }
+                return null;
+            });
+            throw new CancellationNoteProcessingException("Concurrent insert for document: " + documentId, e);
+        } catch (DataIntegrityViolationException e) {
+            processFailureCounter.increment();
+            sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId,
+                "Constraint violation for document " + documentId + ": " + e.toString());
+            throw new CancellationNoteProcessingException("Constraint violation for document " + documentId, e);
+        } catch (Exception e) {
+            processFailureCounter.increment();
+            sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId,
+                "Processing error for document " + documentId + ": " + e.toString());
+            throw new CancellationNoteProcessingException("Failed to process cancellation note " + documentId, e);
+        } finally {
+            sample.stop(processingTimer);
+        }
+    }
+
+    private void processNoteForSagaInternal(String documentId, String xmlContent,
+                                             String sagaId, SagaStep sagaStep, String correlationId)
+            throws CancellationNoteParserPort.CancellationNoteParsingException {
+        Optional<ProcessedCancellationNote> existing = noteRepository.findBySourceNoteId(documentId);
+        if (existing.isPresent()) {
+            ProcessedCancellationNote existingNote = existing.get();
+            if (existingNote.status() == ProcessingStatus.COMPLETED) {
+                log.warn("Cancellation note already completed for document {}, returning idempotent success", documentId);
+                processIdempotentCounter.increment();
+                sagaReplyPort.publishSuccess(sagaId, sagaStep, correlationId);
+                return;
+            }
+            if (existingNote.status() == ProcessingStatus.PROCESSING) {
+                log.warn("Cancellation note for document {} found in PROCESSING state — resuming completion", documentId);
+                existingNote.markCompleted();
+                noteRepository.save(existingNote);
+                eventPublisher.publish(CancellationNoteProcessedDomainEvent.of(
+                    existingNote.sourceNoteId(), existingNote.cancellationNoteNumber(),
+                    existingNote.getTotal(), sagaId, correlationId));
+                sagaReplyPort.publishSuccess(sagaId, sagaStep, correlationId);
+                processSuccessCounter.increment();
+                return;
+            }
+            throw new IllegalStateException("Cancellation note for document " + documentId +
+                " has unexpected persisted status: " + existingNote.status());
+        }
+
+        ProcessedCancellationNote note = parserPort.parse(xmlContent, documentId);
+        note.markProcessing();
+        ProcessedCancellationNote saved = noteRepository.save(note);
+        saved.markCompleted();
+        noteRepository.save(saved);
+
+        eventPublisher.publish(CancellationNoteProcessedDomainEvent.of(
+            saved.sourceNoteId(), saved.cancellationNoteNumber(),
+            saved.getTotal(), sagaId, correlationId));
+        sagaReplyPort.publishSuccess(sagaId, sagaStep, correlationId);
+        processSuccessCounter.increment();
+        log.info("Successfully processed cancellation note: {}", saved.cancellationNoteNumber());
+    }
+
+    @Override
+    @Transactional
+    public void compensate(String documentId, String sagaId, SagaStep sagaStep, String correlationId) {
+        log.info("Compensating cancellation note for document: {}", documentId);
+        try {
+            Optional<ProcessedCancellationNote> existing = noteRepository.findBySourceNoteId(documentId);
+            if (existing.isPresent()) {
+                noteRepository.deleteById(existing.get().id());
+                log.info("Deleted cancellation note for document: {}", documentId);
+            } else {
+                compensateIdempotentCounter.increment();
+                log.warn("Cancellation note not found for compensation of document {} — treating as idempotent", documentId);
+            }
+            sagaReplyPort.publishCompensated(sagaId, sagaStep, correlationId);
+            compensateSuccessCounter.increment();
+        } catch (Exception e) {
+            compensateFailureCounter.increment();
+            log.error("Failed to compensate cancellation note for saga {}: {}", sagaId, e.toString(), e);
+            sagaReplyPort.publishFailure(sagaId, sagaStep, correlationId, "Compensation failed: " + e.toString());
+            throw new CompensateCancellationNoteUseCase.CancellationNoteCompensationException(
+                "Compensation failed for document " + documentId, e);
+        }
+    }
+
+    private static boolean isSourceNoteIdViolation(DuplicateKeyException e) {
+        Throwable cause = e.getMostSpecificCause();
+        String msg = cause.getMessage();
+        if (msg == null || !msg.contains("uq_processed_cancellation_notes_source_note_id")) return false;
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException sqlEx && "23505".equals(sqlEx.getSQLState())) return true;
+        }
+        return false;
+    }
+}
+```
+
+- [ ] **Step 3: Run test to verify it passes**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn test -Dtest=CancellationNoteProcessingServiceTest 2>&1 | tail -15
+```
+
+Expected: All tests pass.
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && git add \
+     src/main/java/com/wpanther/cancellationnote/processing/application/service/CancellationNoteProcessingService.java \
+     src/test/java/com/wpanther/cancellationnote/processing/application/service/CancellationNoteProcessingServiceTest.java \
+  && git commit -m "refactor: CancellationNoteProcessingService implements both use cases with idempotency, race condition guard, and Micrometer metrics"
+```
+
+---
+
+### Task 8: Inbound adapter
+
+**Files:**
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/in/messaging/dto/ProcessCancellationNoteCommand.java`
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/in/messaging/dto/CompensateCancellationNoteCommand.java`
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/in/messaging/SagaCommandHandler.java`
+- Create: `src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/in/messaging/SagaRouteConfig.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/in/messaging/SagaCommandHandlerTest.java`
+
+- [ ] **Step 1: Write failing tests for SagaCommandHandler**
+
+```java
+// src/test/java/.../infrastructure/adapter/in/messaging/SagaCommandHandlerTest.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging;
+
+import com.wpanther.cancellationnote.processing.application.port.in.CompensateCancellationNoteUseCase;
+import com.wpanther.cancellationnote.processing.application.port.in.ProcessCancellationNoteUseCase;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging.dto.CompensateCancellationNoteCommand;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging.dto.ProcessCancellationNoteCommand;
+import com.wpanther.saga.domain.enums.SagaStep;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class SagaCommandHandlerTest {
+
+    @Mock private ProcessCancellationNoteUseCase processUseCase;
+    @Mock private CompensateCancellationNoteUseCase compensateUseCase;
+    @InjectMocks private SagaCommandHandler handler;
+
+    @Test
+    void handleProcessCommand_delegatesToUseCase() throws Exception {
+        ProcessCancellationNoteCommand cmd = new ProcessCancellationNoteCommand(
+            "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1", "doc-1", "<xml/>", "CN-001");
+
+        handler.handleProcessCommand(cmd);
+
+        verify(processUseCase).process("doc-1", "<xml/>", "saga-1",
+            SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+    }
+
+    @Test
+    void handleProcessCommand_swallowsProcessingException() throws Exception {
+        ProcessCancellationNoteCommand cmd = new ProcessCancellationNoteCommand(
+            "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1", "doc-1", "<xml/>", "CN-001");
+        doThrow(new ProcessCancellationNoteUseCase.CancellationNoteProcessingException("err"))
+            .when(processUseCase).process(anyString(), anyString(), anyString(), any(), anyString());
+
+        handler.handleProcessCommand(cmd); // must not throw
+    }
+
+    @Test
+    void handleCompensation_delegatesToUseCase() {
+        CompensateCancellationNoteCommand cmd = new CompensateCancellationNoteCommand(
+            "saga-1", SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1", "PROCESS_CANCELLATION_NOTE", "doc-1", "CANCELLATION_NOTE");
+
+        handler.handleCompensation(cmd);
+
+        verify(compensateUseCase).compensate("doc-1", "saga-1",
+            SagaStep.PROCESS_CANCELLATION_NOTE, "corr-1");
+    }
+}
+```
+
+- [ ] **Step 2: Create `ProcessCancellationNoteCommand`**
+
+```java
+// src/main/java/.../infrastructure/adapter/in/messaging/dto/ProcessCancellationNoteCommand.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging.dto;
+
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.saga.domain.model.SagaCommand;
+import lombok.Getter;
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+public class ProcessCancellationNoteCommand extends SagaCommand {
+    private static final long serialVersionUID = 1L;
+
+    @JsonProperty("documentId") private final String documentId;
+    @JsonProperty("xmlContent") private final String xmlContent;
+    @JsonProperty("cancellationNoteNumber") private final String cancellationNoteNumber;
+
+    @JsonCreator
+    public ProcessCancellationNoteCommand(
+            @JsonProperty("eventId") UUID eventId,
+            @JsonProperty("occurredAt") Instant occurredAt,
+            @JsonProperty("eventType") String eventType,
+            @JsonProperty("version") int version,
+            @JsonProperty("sagaId") String sagaId,
+            @JsonProperty("sagaStep") SagaStep sagaStep,
+            @JsonProperty("correlationId") String correlationId,
+            @JsonProperty("documentId") String documentId,
+            @JsonProperty("xmlContent") String xmlContent,
+            @JsonProperty("cancellationNoteNumber") String cancellationNoteNumber) {
+        super(eventId, occurredAt, eventType, version, sagaId, sagaStep, correlationId);
+        this.documentId = documentId;
+        this.xmlContent = xmlContent;
+        this.cancellationNoteNumber = cancellationNoteNumber;
+    }
+
+    public ProcessCancellationNoteCommand(String sagaId, SagaStep sagaStep, String correlationId,
+                                           String documentId, String xmlContent, String cancellationNoteNumber) {
+        super(sagaId, sagaStep, correlationId);
+        this.documentId = documentId;
+        this.xmlContent = xmlContent;
+        this.cancellationNoteNumber = cancellationNoteNumber;
+    }
+}
+```
+
+- [ ] **Step 3: Create `CompensateCancellationNoteCommand`**
+
+```java
+// src/main/java/.../infrastructure/adapter/in/messaging/dto/CompensateCancellationNoteCommand.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging.dto;
+
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.wpanther.saga.domain.enums.SagaStep;
+import com.wpanther.saga.domain.model.SagaCommand;
+import lombok.Getter;
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+public class CompensateCancellationNoteCommand extends SagaCommand {
+    private static final long serialVersionUID = 1L;
+
+    @JsonProperty("stepToCompensate") private final String stepToCompensate;
+    @JsonProperty("documentId") private final String documentId;
+    @JsonProperty("documentType") private final String documentType;
+
+    @JsonCreator
+    public CompensateCancellationNoteCommand(
+            @JsonProperty("eventId") UUID eventId,
+            @JsonProperty("occurredAt") Instant occurredAt,
+            @JsonProperty("eventType") String eventType,
+            @JsonProperty("version") int version,
+            @JsonProperty("sagaId") String sagaId,
+            @JsonProperty("sagaStep") SagaStep sagaStep,
+            @JsonProperty("correlationId") String correlationId,
+            @JsonProperty("stepToCompensate") String stepToCompensate,
+            @JsonProperty("documentId") String documentId,
+            @JsonProperty("documentType") String documentType) {
+        super(eventId, occurredAt, eventType, version, sagaId, sagaStep, correlationId);
+        this.stepToCompensate = stepToCompensate;
+        this.documentId = documentId;
+        this.documentType = documentType;
+    }
+
+    public CompensateCancellationNoteCommand(String sagaId, SagaStep sagaStep, String correlationId,
+                                              String stepToCompensate, String documentId, String documentType) {
+        super(sagaId, sagaStep, correlationId);
+        this.stepToCompensate = stepToCompensate;
+        this.documentId = documentId;
+        this.documentType = documentType;
+    }
+}
+```
+
+- [ ] **Step 4: Create `SagaCommandHandler`**
+
+```java
+// src/main/java/.../infrastructure/adapter/in/messaging/SagaCommandHandler.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging;
+
+import com.wpanther.cancellationnote.processing.application.port.in.CompensateCancellationNoteUseCase;
+import com.wpanther.cancellationnote.processing.application.port.in.ProcessCancellationNoteUseCase;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging.dto.CompensateCancellationNoteCommand;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging.dto.ProcessCancellationNoteCommand;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class SagaCommandHandler {
+
+    private final ProcessCancellationNoteUseCase processCancellationNoteUseCase;
+    private final CompensateCancellationNoteUseCase compensateCancellationNoteUseCase;
+
+    public void handleProcessCommand(ProcessCancellationNoteCommand command) {
+        log.info("Handling ProcessCancellationNoteCommand for saga {} document {}",
+            command.getSagaId(), command.getDocumentId());
+        try {
+            processCancellationNoteUseCase.process(
+                command.getDocumentId(), command.getXmlContent(),
+                command.getSagaId(), command.getSagaStep(), command.getCorrelationId());
+        } catch (ProcessCancellationNoteUseCase.CancellationNoteProcessingException e) {
+            log.error("Failed to process cancellation note for saga {}: {}",
+                command.getSagaId(), e.toString(), e);
+        }
+    }
+
+    public void handleCompensation(CompensateCancellationNoteCommand command) {
+        log.info("Handling compensation for saga {} document {}",
+            command.getSagaId(), command.getDocumentId());
+        compensateCancellationNoteUseCase.compensate(
+            command.getDocumentId(), command.getSagaId(),
+            command.getSagaStep(), command.getCorrelationId());
+    }
+}
+```
+
+- [ ] **Step 5: Create `SagaRouteConfig`**
+
+```java
+// src/main/java/.../infrastructure/adapter/in/messaging/SagaRouteConfig.java
+package com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging;
+
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging.dto.CompensateCancellationNoteCommand;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.in.messaging.dto.ProcessCancellationNoteCommand;
+import com.wpanther.cancellationnote.processing.infrastructure.config.KafkaTopicsProperties;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.model.dataformat.JsonLibrary;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+@Component
+@Slf4j
+public class SagaRouteConfig extends RouteBuilder {
+
+    private static final String GROUP_ID = "cancellationnote-processing-service";
+
+    private final SagaCommandHandler sagaCommandHandler;
+    private final KafkaTopicsProperties topics;
+
+    @Value("${app.kafka.bootstrap-servers}")
+    private String kafkaBrokers;
+
+    @Value("${app.camel.retry.max-redeliveries:3}")
+    private int maxRedeliveries;
+
+    @Value("${app.camel.retry.redelivery-delay-ms:1000}")
+    private long redeliveryDelayMs;
+
+    @Value("${app.camel.retry.backoff-multiplier:2.0}")
+    private double backoffMultiplier;
+
+    @Value("${app.camel.retry.max-redelivery-delay-ms:10000}")
+    private long maxRedeliveryDelayMs;
+
+    @Value("${app.kafka.consumers.max-poll-records:100}")
+    private int maxPollRecords;
+
+    @Value("${app.kafka.consumers.count:3}")
+    private int consumersCount;
+
+    public SagaRouteConfig(SagaCommandHandler sagaCommandHandler, KafkaTopicsProperties topics) {
+        this.sagaCommandHandler = sagaCommandHandler;
+        this.topics = topics;
+    }
+
+    private String kafkaConsumerParams() {
+        return "?brokers=RAW(" + kafkaBrokers + ")"
+            + "&groupId=" + GROUP_ID
+            + "&autoOffsetReset=earliest"
+            + "&autoCommitEnable=false"
+            + "&breakOnFirstError=true"
+            + "&maxPollRecords=" + maxPollRecords
+            + "&consumersCount=" + consumersCount;
+    }
+
+    @Override
+    public void configure() throws Exception {
+        errorHandler(deadLetterChannel("kafka:" + topics.dlq() + "?brokers=RAW(" + kafkaBrokers + ")")
+            .maximumRedeliveries(maxRedeliveries)
+            .redeliveryDelay(redeliveryDelayMs)
+            .useExponentialBackOff()
+            .backOffMultiplier(backoffMultiplier)
+            .maximumRedeliveryDelay(maxRedeliveryDelayMs)
+            .logExhausted(true)
+            .logStackTrace(true));
+
+        from("kafka:" + topics.sagaCommandCancellationNote() + kafkaConsumerParams())
+            .routeId("saga-command-consumer")
+            .log("Received saga command: partition=${header[kafka.PARTITION]}, offset=${header[kafka.OFFSET]}")
+            .unmarshal().json(JsonLibrary.Jackson, ProcessCancellationNoteCommand.class)
+            .process(exchange -> {
+                ProcessCancellationNoteCommand cmd = exchange.getIn().getBody(ProcessCancellationNoteCommand.class);
+                log.info("Processing saga command for saga: {}, cancellation note: {}",
+                    cmd.getSagaId(), cmd.getCancellationNoteNumber());
+                sagaCommandHandler.handleProcessCommand(cmd);
+            })
+            .log("Successfully processed saga command");
+
+        from("kafka:" + topics.sagaCompensationCancellationNote() + kafkaConsumerParams())
+            .routeId("saga-compensation-consumer")
+            .log("Received compensation command: partition=${header[kafka.PARTITION]}, offset=${header[kafka.OFFSET]}")
+            .unmarshal().json(JsonLibrary.Jackson, CompensateCancellationNoteCommand.class)
+            .process(exchange -> {
+                CompensateCancellationNoteCommand cmd = exchange.getIn().getBody(CompensateCancellationNoteCommand.class);
+                log.info("Processing compensation for saga: {}, document: {}",
+                    cmd.getSagaId(), cmd.getDocumentId());
+                sagaCommandHandler.handleCompensation(cmd);
+            })
+            .log("Successfully processed compensation command");
+    }
+}
+```
+
+- [ ] **Step 6: Run inbound adapter tests**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn test -Dtest=SagaCommandHandlerTest 2>&1 | tail -10
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && git add \
+     src/main/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/in/messaging/ \
+     src/test/java/com/wpanther/cancellationnote/processing/infrastructure/adapter/in/messaging/ \
+  && git commit -m "feat: add inbound messaging adapter (SagaCommandHandler, SagaRouteConfig, command DTOs)"
+```
+
+---
+
+### Task 9: Domain model unit tests
+
+**Files:**
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/domain/model/ProcessedCancellationNoteTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/domain/model/CancellationNoteIdTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/domain/model/MoneyTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/domain/model/LineItemTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/domain/model/PartyTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/domain/model/AddressTest.java`
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/domain/model/TaxIdentifierTest.java`
+
+- [ ] **Step 1: Write all domain model tests**
+
+```java
+// src/test/java/.../domain/model/CancellationNoteIdTest.java
+package com.wpanther.cancellationnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+import java.util.UUID;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CancellationNoteIdTest {
+    @Test
+    void generate_producesUniqueIds() {
+        assertNotEquals(CancellationNoteId.generate(), CancellationNoteId.generate());
+    }
+    @Test
+    void constructor_withNull_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () -> new CancellationNoteId(null));
+    }
+    @Test
+    void value_returnsUnderlyingUuid() {
+        UUID uuid = UUID.randomUUID();
+        assertEquals(uuid, new CancellationNoteId(uuid).value());
+    }
+}
+```
+
+```java
+// src/test/java/.../domain/model/MoneyTest.java
+package com.wpanther.cancellationnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+import java.math.BigDecimal;
+import static org.junit.jupiter.api.Assertions.*;
+
+class MoneyTest {
+    @Test
+    void of_createsMoneyWithCorrectValues() {
+        Money m = Money.of(new BigDecimal("1000.00"), "THB");
+        assertEquals(new BigDecimal("1000.00"), m.amount());
+        assertEquals("THB", m.currency());
+    }
+    @Test
+    void add_sameCurrency_returnsSum() {
+        Money a = Money.of(100, "THB");
+        Money b = Money.of(200, "THB");
+        assertEquals(Money.of(300, "THB"), a.add(b));
+    }
+    @Test
+    void add_differentCurrency_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class,
+            () -> Money.of(100, "THB").add(Money.of(100, "USD")));
+    }
+    @Test
+    void zero_returnsMoneyWithZeroAmount() {
+        assertTrue(Money.zero("THB").isZero());
+    }
+    @Test
+    void constructor_withInvalidCurrency_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () -> Money.of(100, "TH"));
+    }
+    @Test
+    void multiply_scaledCorrectly() {
+        Money m = Money.of(new BigDecimal("100.00"), "THB");
+        assertEquals(Money.of(new BigDecimal("700.00"), "THB"), m.multiply(7));
+    }
+}
+```
+
+```java
+// src/test/java/.../domain/model/AddressTest.java
+package com.wpanther.cancellationnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class AddressTest {
+    @Test
+    void of_createsAddressWithCorrectValues() {
+        Address a = Address.of("123 St", "Bangkok", "10110", "TH");
+        assertEquals("TH", a.country());
+    }
+    @Test
+    void constructor_withNullCountry_throwsNullPointerException() {
+        assertThrows(NullPointerException.class, () -> Address.of("123 St", "Bangkok", "10110", null));
+    }
+    @Test
+    void constructor_withBlankCountry_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () -> Address.of("123 St", "Bangkok", "10110", "  "));
+    }
+    @Test
+    void streetAndCityCanBeNull() {
+        assertDoesNotThrow(() -> Address.of(null, null, null, "TH"));
+    }
+}
+```
+
+```java
+// src/test/java/.../domain/model/TaxIdentifierTest.java
+package com.wpanther.cancellationnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class TaxIdentifierTest {
+    @Test
+    void of_createsWithCorrectValues() {
+        TaxIdentifier t = TaxIdentifier.of("1234567890", "VAT");
+        assertEquals("1234567890", t.value());
+        assertEquals("VAT", t.scheme());
+    }
+    @Test
+    void constructor_withNullValue_throwsNullPointerException() {
+        assertThrows(NullPointerException.class, () -> TaxIdentifier.of(null, "VAT"));
+    }
+    @Test
+    void constructor_withBlankValue_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () -> TaxIdentifier.of("  ", "VAT"));
+    }
+    @Test
+    void toString_includesSchemeAndValue() {
+        assertTrue(TaxIdentifier.of("1234567890", "VAT").toString().contains("VAT"));
+    }
+}
+```
+
+```java
+// src/test/java/.../domain/model/PartyTest.java
+package com.wpanther.cancellationnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class PartyTest {
+    private static final Address ADDR = Address.of("123 St", "Bangkok", "10110", "TH");
+    private static final TaxIdentifier TAX = TaxIdentifier.of("1234567890", "VAT");
+
+    @Test
+    void of_createsWithCorrectValues() {
+        Party p = Party.of("Seller Co", TAX, ADDR, "email@example.com");
+        assertEquals("Seller Co", p.name());
+        assertEquals("email@example.com", p.email());
+    }
+    @Test
+    void constructor_withNullName_throwsNullPointerException() {
+        assertThrows(NullPointerException.class, () -> Party.of(null, TAX, ADDR, null));
+    }
+    @Test
+    void constructor_withBlankName_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () -> Party.of("  ", TAX, ADDR, null));
+    }
+    @Test
+    void emailCanBeNull() {
+        assertDoesNotThrow(() -> Party.of("Seller Co", TAX, ADDR, null));
+    }
+}
+```
+
+```java
+// src/test/java/.../domain/model/LineItemTest.java
+package com.wpanther.cancellationnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+import java.math.BigDecimal;
+import static org.junit.jupiter.api.Assertions.*;
+
+class LineItemTest {
+    private static final Money UNIT = Money.of(new BigDecimal("100.00"), "THB");
+
+    @Test
+    void getLineTotal_returnsQuantityTimesUnitPrice() {
+        LineItem item = new LineItem("Service", 3, UNIT, BigDecimal.ZERO);
+        assertEquals(Money.of(new BigDecimal("300.00"), "THB"), item.getLineTotal());
+    }
+    @Test
+    void getTaxAmount_calculatesCorrectly() {
+        LineItem item = new LineItem("Service", 1, UNIT, new BigDecimal("7.00"));
+        assertEquals(Money.of(new BigDecimal("7.00"), "THB"), item.getTaxAmount());
+    }
+    @Test
+    void getTotalWithTax_isLineTotalPlusTax() {
+        LineItem item = new LineItem("Service", 1, UNIT, new BigDecimal("7.00"));
+        assertEquals(Money.of(new BigDecimal("107.00"), "THB"), item.getTotalWithTax());
+    }
+    @Test
+    void constructor_withZeroQuantity_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () -> new LineItem("Service", 0, UNIT, BigDecimal.ZERO));
+    }
+    @Test
+    void constructor_withNegativeTaxRate_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class,
+            () -> new LineItem("Service", 1, UNIT, new BigDecimal("-1")));
+    }
+}
+```
+
+```java
+// src/test/java/.../domain/model/ProcessedCancellationNoteTest.java
+package com.wpanther.cancellationnote.processing.domain.model;
+
+import org.junit.jupiter.api.Test;
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.List;
+import static org.junit.jupiter.api.Assertions.*;
+
+class ProcessedCancellationNoteTest {
+
+    private static ProcessedCancellationNote buildNote() {
+        Party seller = Party.of("Seller", TaxIdentifier.of("1111111111", "VAT"),
+            new Address("1 St", "BKK", "10100", "TH"), null);
+        Party buyer = Party.of("Buyer", TaxIdentifier.of("2222222222", "VAT"),
+            new Address("2 St", "BKK", "10200", "TH"), null);
+        LineItem item = new LineItem("Product", 2, Money.of(new BigDecimal("500.00"), "THB"), new BigDecimal("7.00"));
+        return ProcessedCancellationNote.builder()
+            .id(CancellationNoteId.generate())
+            .sourceNoteId("src-1").cancellationNoteNumber("CN-001")
+            .issueDate(LocalDate.of(2025, 1, 1)).cancellationDate(LocalDate.of(2025, 1, 1))
+            .seller(seller).buyer(buyer).items(List.of(item))
+            .currency("THB").cancelledInvoiceNumber("INV-001").originalXml("<xml/>")
+            .build();
+    }
+
+    @Test
+    void initialStatus_isPending() {
+        assertEquals(ProcessingStatus.PENDING, buildNote().status());
+    }
+
+    @Test
+    void markProcessing_changesStatusToProcessing() {
+        ProcessedCancellationNote note = buildNote();
+        note.markProcessing();
+        assertEquals(ProcessingStatus.PROCESSING, note.status());
+    }
+
+    @Test
+    void markCompleted_changesStatusToCompleted() {
+        ProcessedCancellationNote note = buildNote();
+        note.markCompleted();
+        assertEquals(ProcessingStatus.COMPLETED, note.status());
+        assertNotNull(note.completedAt());
+    }
+
+    @Test
+    void getTotal_sumsTotalWithTaxAcrossItems() {
+        ProcessedCancellationNote note = buildNote();
+        // 2 items × 500.00 = 1000.00 + 7% tax = 1070.00
+        assertEquals(Money.of(new BigDecimal("1070.00"), "THB"), note.getTotal());
+    }
+
+    @Test
+    void getSubtotal_returnsLineTotalsSum() {
+        assertEquals(Money.of(new BigDecimal("1000.00"), "THB"), buildNote().getSubtotal());
+    }
+
+    @Test
+    void builder_withNoCancellationDate_defaultsToIssueDate() {
+        // issueDate and cancellationDate are both supplied — test that they match
+        ProcessedCancellationNote note = buildNote();
+        assertEquals(note.issueDate(), note.cancellationDate());
+    }
+
+    @Test
+    void builder_withEmptyItems_throwsIllegalStateException() {
+        Party seller = Party.of("Seller", TaxIdentifier.of("1111111111", "VAT"),
+            new Address("1 St", "BKK", "10100", "TH"), null);
+        Party buyer = Party.of("Buyer", TaxIdentifier.of("2222222222", "VAT"),
+            new Address("2 St", "BKK", "10200", "TH"), null);
+        assertThrows(IllegalStateException.class, () ->
+            ProcessedCancellationNote.builder()
+                .id(CancellationNoteId.generate()).sourceNoteId("src-1")
+                .cancellationNoteNumber("CN-001").issueDate(LocalDate.of(2025,1,1))
+                .cancellationDate(LocalDate.of(2025,1,1))
+                .seller(seller).buyer(buyer).items(List.of())
+                .currency("THB").cancelledInvoiceNumber("INV-001").originalXml("<xml/>")
+                .build());
+    }
+
+    @Test
+    void builder_withCancellationDateBeforeIssueDate_throwsIllegalStateException() {
+        Party seller = Party.of("Seller", TaxIdentifier.of("1111111111", "VAT"),
+            new Address("1 St", "BKK", "10100", "TH"), null);
+        Party buyer = Party.of("Buyer", TaxIdentifier.of("2222222222", "VAT"),
+            new Address("2 St", "BKK", "10200", "TH"), null);
+        LineItem item = new LineItem("P", 1, Money.of(new BigDecimal("100"), "THB"), BigDecimal.ZERO);
+        assertThrows(IllegalStateException.class, () ->
+            ProcessedCancellationNote.builder()
+                .id(CancellationNoteId.generate()).sourceNoteId("src-1")
+                .cancellationNoteNumber("CN-001").issueDate(LocalDate.of(2025,2,1))
+                .cancellationDate(LocalDate.of(2025,1,1))
+                .seller(seller).buyer(buyer).items(List.of(item))
+                .currency("THB").cancelledInvoiceNumber("INV-001").originalXml("<xml/>")
+                .build());
+    }
+}
+```
+
+- [ ] **Step 2: Run domain model tests**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn test \
+     -Dtest="CancellationNoteIdTest,MoneyTest,AddressTest,TaxIdentifierTest,PartyTest,LineItemTest,ProcessedCancellationNoteTest" \
+     2>&1 | tail -15
+```
+
+Expected: All tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && git add src/test/java/com/wpanther/cancellationnote/processing/domain/model/ \
+  && git commit -m "test: add domain model unit tests"
+```
+
+---
+
+### Task 10: Domain event test
+
+**Files:**
+- Create: `src/test/java/com/wpanther/cancellationnote/processing/domain/event/CancellationNoteProcessedDomainEventTest.java`
+
+- [ ] **Step 1: Write test**
+
+```java
+// src/test/java/.../domain/event/CancellationNoteProcessedDomainEventTest.java
+package com.wpanther.cancellationnote.processing.domain.event;
+
+import com.wpanther.cancellationnote.processing.domain.model.Money;
+import org.junit.jupiter.api.Test;
+import java.math.BigDecimal;
+import java.time.Instant;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CancellationNoteProcessedDomainEventTest {
+
+    @Test
+    void of_setsAllFieldsCorrectly() {
+        Money total = Money.of(new BigDecimal("1070.00"), "THB");
+        CancellationNoteProcessedDomainEvent event = CancellationNoteProcessedDomainEvent.of(
+            "note-id-1", "CN-001", total, "INV-001", "saga-1", "corr-1");
+
+        assertEquals("note-id-1", event.noteId());
+        assertEquals("CN-001", event.cancellationNoteNumber());
+        assertEquals(total, event.total());
+        assertEquals("INV-001", event.cancelledInvoiceNumber());
+        assertEquals("saga-1", event.sagaId());
+        assertEquals("corr-1", event.correlationId());
+        assertNotNull(event.occurredAt());
+    }
+
+    @Test
+    void of_occurredAt_isCloseToNow() {
+        Instant before = Instant.now();
+        CancellationNoteProcessedDomainEvent event = CancellationNoteProcessedDomainEvent.of(
+            "n", "CN", Money.of(BigDecimal.ONE, "THB"), "I", "s", "c");
+        Instant after = Instant.now();
+        assertFalse(event.occurredAt().isBefore(before));
+        assertFalse(event.occurredAt().isAfter(after));
+    }
+
+    @Test
+    void record_equality_basedOnFields() {
+        Money total = Money.of(new BigDecimal("100.00"), "THB");
+        Instant now = Instant.now();
+        CancellationNoteProcessedDomainEvent e1 = new CancellationNoteProcessedDomainEvent(
+            "n", "CN", total, "I", "s", "c", now);
+        CancellationNoteProcessedDomainEvent e2 = new CancellationNoteProcessedDomainEvent(
+            "n", "CN", total, "I", "s", "c", now);
+        assertEquals(e1, e2);
+    }
+}
+```
+
+- [ ] **Step 2: Run test**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn test -Dtest=CancellationNoteProcessedDomainEventTest 2>&1 | tail -10
+```
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && git add src/test/java/com/wpanther/cancellationnote/processing/domain/event/ \
+  && git commit -m "test: add CancellationNoteProcessedDomainEvent unit test"
+```
+
+---
+
+### Task 11: Delete old files and final verification
+
+**Files deleted:**
+- `src/main/java/.../domain/event/CancellationNoteReplyEvent.java` (moved to infrastructure/adapter/out/messaging/dto/)
+- `src/main/java/.../domain/event/CancellationNoteProcessedEvent.java` (moved to application/dto/event/)
+- `src/main/java/.../domain/event/ProcessCancellationNoteCommand.java` (moved to infrastructure/adapter/in/messaging/dto/)
+- `src/main/java/.../domain/event/CompensateCancellationNoteCommand.java` (moved to infrastructure/adapter/in/messaging/dto/)
+- `src/main/java/.../domain/service/CancellationNoteParserService.java` (replaced by domain/port/out/CancellationNoteParserPort)
+- `src/main/java/.../domain/repository/ProcessedCancellationNoteRepository.java` (replaced by domain/port/out/ProcessedCancellationNoteRepository)
+- `src/main/java/.../infrastructure/service/CancellationNoteParserServiceImpl.java` (moved to infrastructure/adapter/out/parsing/)
+- `src/main/java/.../infrastructure/messaging/SagaReplyPublisher.java` (moved to infrastructure/adapter/out/messaging/)
+- `src/main/java/.../infrastructure/messaging/EventPublisher.java` (moved to infrastructure/adapter/out/messaging/)
+- `src/main/java/.../application/service/SagaCommandHandler.java` (moved to infrastructure/adapter/in/messaging/)
+- `src/main/java/.../infrastructure/config/SagaRouteConfig.java` (moved to infrastructure/adapter/in/messaging/)
+- `src/main/java/.../infrastructure/persistence/CancellationNoteLineItemEntity.java` (moved to infrastructure/adapter/out/persistence/)
+- `src/main/java/.../infrastructure/persistence/CancellationNotePartyEntity.java` (moved to infrastructure/adapter/out/persistence/)
+- `src/main/java/.../infrastructure/persistence/JpaProcessedCancellationNoteRepository.java` (moved to infrastructure/adapter/out/persistence/)
+- `src/main/java/.../infrastructure/persistence/ProcessedCancellationNoteEntity.java` (moved to infrastructure/adapter/out/persistence/)
+- `src/main/java/.../infrastructure/persistence/ProcessedCancellationNoteRepositoryImpl.java` (moved to infrastructure/adapter/out/persistence/)
+- `src/main/java/.../infrastructure/persistence/outbox/OutboxEventEntity.java` (moved to infrastructure/adapter/out/persistence/outbox/)
+- `src/main/java/.../infrastructure/persistence/outbox/SpringDataOutboxRepository.java` (moved to infrastructure/adapter/out/persistence/outbox/)
+- `src/main/java/.../infrastructure/persistence/outbox/JpaOutboxEventRepository.java` (moved to infrastructure/adapter/out/persistence/outbox/)
+
+**Files modified:**
+- `src/main/java/.../infrastructure/config/OutboxConfig.java` — update import from old outbox package to new
+
+- [ ] **Step 1: Update `OutboxConfig.java` import**
+
+Update the import from:
+```java
+import com.wpanther.cancellationnote.processing.infrastructure.persistence.outbox.JpaOutboxEventRepository;
+import com.wpanther.cancellationnote.processing.infrastructure.persistence.outbox.SpringDataOutboxRepository;
+```
+To:
+```java
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.out.persistence.outbox.JpaOutboxEventRepository;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.out.persistence.outbox.SpringDataOutboxRepository;
+```
+
+- [ ] **Step 2: Delete old files**
+
+```bash
+BASE=src/main/java/com/wpanther/cancellationnote/processing
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service
+
+rm "$BASE/domain/event/CancellationNoteReplyEvent.java"
+rm "$BASE/domain/event/CancellationNoteProcessedEvent.java"
+rm "$BASE/domain/event/ProcessCancellationNoteCommand.java"
+rm "$BASE/domain/event/CompensateCancellationNoteCommand.java"
+rm "$BASE/domain/service/CancellationNoteParserService.java"
+rm "$BASE/domain/repository/ProcessedCancellationNoteRepository.java"
+rm "$BASE/infrastructure/service/CancellationNoteParserServiceImpl.java"
+rm "$BASE/infrastructure/messaging/SagaReplyPublisher.java"
+rm "$BASE/infrastructure/messaging/EventPublisher.java"
+rm "$BASE/application/service/SagaCommandHandler.java"
+rm "$BASE/infrastructure/config/SagaRouteConfig.java"
+rm "$BASE/infrastructure/persistence/CancellationNoteLineItemEntity.java"
+rm "$BASE/infrastructure/persistence/CancellationNotePartyEntity.java"
+rm "$BASE/infrastructure/persistence/JpaProcessedCancellationNoteRepository.java"
+rm "$BASE/infrastructure/persistence/ProcessedCancellationNoteEntity.java"
+rm "$BASE/infrastructure/persistence/ProcessedCancellationNoteRepositoryImpl.java"
+rm "$BASE/infrastructure/persistence/outbox/OutboxEventEntity.java"
+rm "$BASE/infrastructure/persistence/outbox/SpringDataOutboxRepository.java"
+rm "$BASE/infrastructure/persistence/outbox/JpaOutboxEventRepository.java"
+
+# Remove now-empty directories
+rmdir "$BASE/domain/service" "$BASE/domain/repository" \
+      "$BASE/infrastructure/service" "$BASE/infrastructure/messaging" \
+      "$BASE/infrastructure/persistence/outbox" "$BASE/infrastructure/persistence" 2>/dev/null || true
+```
+
+- [ ] **Step 3: Run full test suite to confirm everything passes**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn test 2>&1 | tail -20
+```
+
+Expected: `BUILD SUCCESS` with 0 failures and 0 errors across all tests. If compilation fails, check that:
+- All old import references (e.g. `infrastructure.persistence.outbox`) are replaced with the new package path
+- The old `CancellationNoteParserService` / `CancellationNoteParserPort` import is consistent throughout
+
+- [ ] **Step 4: Run JaCoCo coverage check**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && mvn verify 2>&1 | grep -E "COVERAGE|Coverage|BUILD"
+```
+
+Expected: `BUILD SUCCESS`. If coverage is below the 80% minimum configured in `pom.xml`, add tests to the failing package before proceeding.
+
+- [ ] **Step 5: Final commit**
+
+```bash
+cd /home/wpanther/projects/etax/invoice-microservices/services/cancellationnote-processing-service \
+  && git add -A \
+  && git commit -m "refactor: remove old non-hexagonal files; hexagonal DDD refactor complete"
+```
