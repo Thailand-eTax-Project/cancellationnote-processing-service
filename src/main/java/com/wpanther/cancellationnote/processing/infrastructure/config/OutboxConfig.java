@@ -1,8 +1,8 @@
 package com.wpanther.cancellationnote.processing.infrastructure.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.wpanther.cancellationnote.processing.infrastructure.persistence.outbox.JpaOutboxEventRepository;
-import com.wpanther.cancellationnote.processing.infrastructure.persistence.outbox.SpringDataOutboxRepository;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.out.persistence.outbox.JpaOutboxEventRepository;
+import com.wpanther.cancellationnote.processing.infrastructure.adapter.out.persistence.outbox.SpringDataOutboxRepository;
 import com.wpanther.saga.domain.outbox.OutboxEventRepository;
 import com.wpanther.saga.infrastructure.outbox.OutboxService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
