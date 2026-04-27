@@ -12,9 +12,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
 
-@Component
+// @Component - superseded by infrastructure.adapter.out.messaging.SagaReplyPublisher
 @RequiredArgsConstructor
 @Slf4j
+@Deprecated
 public class SagaReplyPublisher {
 
     private static final String REPLY_TOPIC = "saga.reply.cancellation-note";
@@ -24,8 +25,8 @@ public class SagaReplyPublisher {
     private final ObjectMapper objectMapper;
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public void publishSuccess(String sagaId, String sagaStep, String correlationId) {
-        CancellationNoteReplyEvent reply = CancellationNoteReplyEvent.success(sagaId, sagaStep, correlationId);
+    public void publishSuccess(String sagaId, String correlationId) {
+        CancellationNoteReplyEvent reply = CancellationNoteReplyEvent.success(sagaId, correlationId);
 
         Map<String, String> headers = Map.of(
             "sagaId", sagaId,
@@ -42,12 +43,12 @@ public class SagaReplyPublisher {
             toJson(headers)
         );
 
-        log.info("Published SUCCESS saga reply for saga {} step {}", sagaId, sagaStep);
+        log.info("Published SUCCESS saga reply for saga {}", sagaId);
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public void publishFailure(String sagaId, String sagaStep, String correlationId, String errorMessage) {
-        CancellationNoteReplyEvent reply = CancellationNoteReplyEvent.failure(sagaId, sagaStep, correlationId, errorMessage);
+    public void publishFailure(String sagaId, String correlationId, String errorMessage) {
+        CancellationNoteReplyEvent reply = CancellationNoteReplyEvent.failure(sagaId, correlationId, errorMessage);
 
         Map<String, String> headers = Map.of(
             "sagaId", sagaId,
@@ -64,12 +65,12 @@ public class SagaReplyPublisher {
             toJson(headers)
         );
 
-        log.info("Published FAILURE saga reply for saga {} step {}: {}", sagaId, sagaStep, errorMessage);
+        log.info("Published FAILURE saga reply for saga {}: {}", sagaId, errorMessage);
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public void publishCompensated(String sagaId, String sagaStep, String correlationId) {
-        CancellationNoteReplyEvent reply = CancellationNoteReplyEvent.compensated(sagaId, sagaStep, correlationId);
+    public void publishCompensated(String sagaId, String correlationId) {
+        CancellationNoteReplyEvent reply = CancellationNoteReplyEvent.compensated(sagaId, correlationId);
 
         Map<String, String> headers = Map.of(
             "sagaId", sagaId,
@@ -86,7 +87,7 @@ public class SagaReplyPublisher {
             toJson(headers)
         );
 
-        log.info("Published COMPENSATED saga reply for saga {} step {}", sagaId, sagaStep);
+        log.info("Published COMPENSATED saga reply for saga {}", sagaId);
     }
 
     private String toJson(Map<String, String> map) {
