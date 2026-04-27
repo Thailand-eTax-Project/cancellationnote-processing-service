@@ -1,0 +1,37 @@
+server:
+  port: 8089
+
+spring:
+  application:
+    name: cancellationnote-processing-service
+
+  datasource:
+    url: jdbc:h2:mem:testdb
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+
+camel:
+    springboot:
+    name: cancellationnote-processing-camel-test
+  dataformat:
+    jackson:
+      auto-discover-object-mapper: true
+
+app:
+  kafka:
+    bootstrap-servers: localhost:9093
+    topics:
+      cancellationnote-processed: cancellationnote.processed.test
+      dlq: cancellationnote.processing.dlq.test
+      saga-command-cancellation-note: saga.command.cancellation-note.test
+      saga-compensation-cancellation-note: saga.compensation.cancellation-note.test
+      saga-reply-cancellation-note: saga.reply.cancellation-note.test
+
+logging:
+  level:
+    root: INFO
+    com.wpanther.cancellationnote.processing: DEBUG
