@@ -115,7 +115,7 @@ Dead letter: `cancellationnote.processing.dlq`
 | `KAFKA_BROKERS` | `localhost:9092` | Kafka bootstrap servers |
 | `EUREKA_URL` | `http://localhost:8761/eureka/` | Eureka server URL |
 
-Service runs on port **8089**.
+Service runs on port **8085**.
 
 ## Running the Service
 
@@ -151,7 +151,7 @@ mvn spring-boot:run
 ```bash
 docker build -t cancellationnote-processing-service:latest .
 
-docker run -p 8089:8089 \
+docker run -p 8085:8085 \
   -e DB_HOST=postgres \
   -e DB_PORT=5432 \
   -e DB_NAME=cancellationnoteprocess_db \
@@ -168,9 +168,9 @@ This service is **event-driven only** — no REST endpoints for business operati
 ### Actuator
 
 ```
-GET http://localhost:8089/actuator/health
-GET http://localhost:8089/actuator/prometheus
-GET http://localhost:8089/actuator/camelroutes
+GET http://localhost:8085/actuator/health
+GET http://localhost:8085/actuator/prometheus
+GET http://localhost:8085/actuator/camelroutes
 ```
 
 ## Testing
